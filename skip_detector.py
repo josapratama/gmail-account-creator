@@ -9,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+import config
 from config import SKIP_KEYWORDS
 
 
@@ -73,63 +74,145 @@ def cek_halaman_crossflow(driver: webdriver.Chrome) -> bool:
         return False
 
 
-def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 15) -> bool:
+def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 30) -> bool:
     """
-    Di halaman crossflowverification, cari dan klik tombol/link
-    'Use a phone number instead' atau 'Try another way' agar browser
-    beralih ke halaman input nomor SMS biasa.
-    Mengembalikan True jika berhasil beralih.
+    Di halaman crossflowverification/samedevice, Google memaksa device check
+    karena mendeteksi HP aktif di jaringan yang sama (hotspot).
+
+    Strategi bertingkat:
+      1. Tunggu halaman fully loaded, lalu cari tombol "Use a phone number instead".
+      2. Jika tidak ada, cari & klik "Continue" dan tunggu redirect ke SMS/sukses.
+      3. Jika masih crossflow setelah "Continue", tampilkan instruksi manual.
+
+    Mengembalikan True jika berhasil keluar dari halaman crossflow.
     """
     from anti_detection import tunggu_acak
 
-    print("   [i] Terdeteksi halaman device-check (crossflow), mencari opsi SMS...")
+    print("   [i] Terdeteksi halaman device-check (crossflow), menunggu halaman load penuh...")
 
-    # Scroll ke bawah dulu karena tombol biasanya di bawah ilustrasi
+    # Tunggu halaman fully loaded (maks 10 detik)
     try:
+        from selenium.webdriver.support.ui import WebDriverWait
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except Exception:
+        pass
+    time.sleep(2)
+
+    # Scroll perlahan ke bawah agar konten lazy-load muncul
+    try:
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 300);")
+            time.sleep(0.5)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
     except Exception:
         pass
 
-    keywords = [
+    # Log semua teks tombol untuk debugging
+    try:
+        semua_tombol = driver.find_elements(
+            By.XPATH, "//button | //a | //div[@role='button'] | //span[@role='button']")
+        teks_tombol = [
+            (el.text or el.get_attribute("aria-label") or "").strip()
+            for el in semua_tombol
+            if el.is_displayed() and (el.text or el.get_attribute("aria-label") or "").strip()
+        ]
+        print(f"   [i] Tombol yang terdeteksi: {teks_tombol}")
+    except Exception:
+        pass
+
+    # ── Strategi 1: cari tombol "Use phone number instead" ──────────────
+    keywords_sms = [
         "use a phone number instead",
         "use phone number instead",
         "phone number instead",
         "try another way",
+        "another way",
         "cara lain",
         "nomor telepon",
         "use phone",
-        "another way",
     ]
-
-    batas = time.time() + timeout
-    while time.time() < batas:
-        kandidat = driver.find_elements(
-            By.XPATH,
-            "//button | //a | //div[@role='button'] | //span[@role='button']"
-        )
-        for el in kandidat:
+    try:
+        semua_el = driver.find_elements(
+            By.XPATH, "//button | //a | //div[@role='button'] | //span[@role='button']")
+        for el in semua_el:
             try:
                 if not el.is_displayed():
                     continue
                 teks = (el.text or "").strip().lower()
                 aria = (el.get_attribute("aria-label") or "").strip().lower()
                 combined = f"{teks} {aria}"
-                if any(k in combined for k in keywords):
+                if any(k in combined for k in keywords_sms):
                     print(f"   [✓] Menemukan opsi SMS: '{el.text.strip() or aria}'")
                     try:
                         el.click()
                     except Exception:
                         driver.execute_script("arguments[0].click();", el)
                     tunggu_acak(2, 3)
-                    # Cek apakah berhasil keluar dari crossflow
                     if not cek_halaman_crossflow(driver):
                         return True
             except Exception:
                 continue
-        time.sleep(0.5)
+    except Exception:
+        pass
 
-    print("   [!] Tombol 'Use phone number instead' tidak ditemukan di halaman crossflow.")
+    # ── Strategi 2: klik "Continue" dan tunggu redirect ─────────────────
+    # Google akan redirect ke HP untuk verifikasi, lalu kembali ke browser
+    keywords_continue = ["continue", "lanjutkan", "next", "berikutnya", "ok"]
+    print("   [i] Tombol SMS tidak ada, mencoba klik 'Continue' dan tunggu redirect...")
+    try:
+        semua_el = driver.find_elements(
+            By.XPATH, "//button | //div[@role='button'] | //span[@role='button']")
+        for el in semua_el:
+            try:
+                if not el.is_displayed():
+                    continue
+                teks = (el.text or "").strip().lower()
+                aria = (el.get_attribute("aria-label") or "").strip().lower()
+                combined = f"{teks} {aria}"
+                if any(k in combined for k in keywords_continue) and len(teks) < 30:
+                    print(f"   [i] Mengklik: '{el.text.strip() or aria}'")
+                    try:
+                        el.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", el)
+                    # Tunggu redirect dari HP (maks 60 detik)
+                    print("   [i] Menunggu verifikasi dari HP (maks 60 detik)...")
+                    batas = time.time() + 60
+                    while time.time() < batas:
+                        if not cek_halaman_crossflow(driver):
+                            print("   [✓] Halaman berubah setelah device check!")
+                            return True
+                        sisa = int(batas - time.time())
+                        if sisa % 10 == 0 and sisa > 0:
+                            print(f"   [i] Menunggu HP menyelesaikan verifikasi... ({sisa}s)")
+                        time.sleep(1)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # ── Strategi 3: instruksi manual ────────────────────────────────────
+    if not config.HEADLESS:
+        print()
+        print("   [?] ══════════════════════════════════════════════")
+        print("   [?]  AKSI MANUAL DIPERLUKAN DI BROWSER:")
+        print("   [?]  Google meminta verifikasi via HP.")
+        print("   [?]  Buka HP Anda, selesaikan verifikasi,")
+        print("   [?]  lalu kembali ke sini dan tekan Enter.")
+        print("   [?] ══════════════════════════════════════════════")
+        try:
+            input("   Tekan Enter setelah verifikasi di HP selesai... ")
+        except EOFError:
+            pass
+        time.sleep(2)
+        if not cek_halaman_crossflow(driver):
+            return True
+
+    print("   [!] Gagal melewati halaman device-check.")
     return False
 
 

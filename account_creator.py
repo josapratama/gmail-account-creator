@@ -45,6 +45,9 @@ class Akun:
 class GmailCreator:
     def __init__(self):
         self.driver = None
+        self.mobile_mode = False     # True = pakai User-Agent + viewport mobile
+        self._qr_hardlock = False    # True = terjebak halaman QR tanpa alternatif
+        self._ip_terakhir = ""       # IP publik terakhir (untuk blacklist)
 
     def _bersihkan_proses_lama(self):
         """Membersihkan proses chromedriver yang tertinggal dari run sebelumnya."""
@@ -60,7 +63,7 @@ class GmailCreator:
 
     def _buat_driver(self):
         proxy = ambil_proxy()
-        opsi = buat_chrome_options(proxy)
+        opsi = buat_chrome_options(proxy, mobile=self.mobile_mode)
 
         # Bersihkan chromedriver lama agar tidak konflik
         self._bersihkan_proses_lama()
@@ -115,8 +118,36 @@ class GmailCreator:
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(30)
 
+        # Terapkan emulasi perangkat mobile jika mode mobile aktif
+        if self.mobile_mode:
+            print("[*] Mode mobile aktif (User-Agent + viewport + touch).")
+            self._terapkan_emulasi_mobile(driver)
+
         self.driver = driver
         return driver
+
+    def _terapkan_emulasi_mobile(self, driver):
+        """Mengaktifkan emulasi metrik perangkat mobile (viewport + touch)."""
+        from anti_detection import MOBILE_WIDTH, MOBILE_HEIGHT
+        try:
+            driver.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": MOBILE_WIDTH,
+                    "height": MOBILE_HEIGHT,
+                    "deviceScaleFactor": 2.625,
+                    "mobile": True,
+                },
+            )
+        except Exception:
+            pass
+        try:
+            driver.execute_cdp_cmd(
+                "Emulation.setTouchEmulationEnabled",
+                {"enabled": True, "maxTouchPoints": 5},
+            )
+        except Exception:
+            pass
 
     def _tunggu_input(self, xpath, timeout=30):
         """Tunggu elemen muncul. Bisa menerima string tunggal atau list XPATH."""
@@ -723,7 +754,60 @@ class GmailCreator:
         """
         Proses lengkap pembuatan 1 akun Gmail.
         Mengembalikan True jika berhasil.
+
+        Jika Google menampilkan halaman QR tanpa alternatif (hard lock),
+        sesi dihentikan lalu dicoba ulang SEKALI dengan kondisi mobile
+        (User-Agent + viewport + touch emulation). Jika masih terkunci QR,
+        akun dilewati dan IP dicatat ke blacklist.
         """
+        akun.sukses = False
+
+        # ── Percobaan 1: mode desktop (default) ──
+        self.mobile_mode = False
+        self._jalankan_pembuatan(akun)
+
+        # ── Percobaan 2: hanya jika QR hard lock -> ulang mode mobile ──
+        if self._qr_hardlock:
+            print("\n[!] Halaman QR tanpa alternatif terdeteksi (mode desktop).")
+            print("[*] Mengulang sekali dengan mode mobile (UA + viewport + touch)...")
+            self._tutup_driver()
+            self.mobile_mode = True
+            akun.sukses = False
+            self._jalankan_pembuatan(akun)
+
+        # ── Masih hard lock di mode mobile -> lewati & catat IP ──
+        if self._qr_hardlock and self.mobile_mode:
+            print("\n[✗] Masih terkunci QR pada mode mobile.")
+            print("[i] Melewati akun ini dan mencatat IP ke blacklist.")
+            self._catat_ip_blacklist()
+
+        # Biarkan browser tetap terbuka untuk inspeksi manual (mode non-headless)
+        if not config.HEADLESS and self.driver:
+            print("\nBrowser dibiarkan terbuka. Tekan Ctrl+C untuk menutup.")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+
+        self._tutup_driver()
+        return akun.sukses
+
+    def _tutup_driver(self):
+        """Menutup driver dengan aman."""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
+
+    def _jalankan_pembuatan(self, akun: Akun) -> bool:
+        """
+        Menjalankan alur pembuatan akun satu kali.
+        Menandai self._qr_hardlock = True jika terjebak halaman QR tanpa alternatif.
+        """
+        self._qr_hardlock = False
         driver = self._buat_driver()
         try:
             # ── Session Warming ──
@@ -1060,15 +1144,6 @@ class GmailCreator:
         except Exception as e:
             print(f"[✗] Terjadi kesalahan: {e}")
             return False
-        finally:
-            if not config.HEADLESS:
-                print("\nBrowser dibiarkan terbuka. Tekan Ctrl+C untuk menutup.")
-                try:
-                    while True:
-                        time.sleep(1)
-                except KeyboardInterrupt:
-                    pass
-            driver.quit()
 
     def _alihkan_qr_ke_sms(self) -> bool:
         """
@@ -1295,7 +1370,10 @@ class GmailCreator:
                 print("   [!] Gagal beralih dari QR ke SMS.")
                 # Jika masih di halaman QR setelah gagal toggle, verifikasi tidak bisa dilanjutkan
                 if cek_halaman_qr(self.driver):
-                    print("   [✗] Masih terjebak di halaman QR, verifikasi telepon tidak mungkin.")
+                    print("   [✗] Masih terjebak di halaman QR (tanpa alternatif).")
+                    # Tandai hard lock agar pemanggil bisa mengulang dengan mode mobile
+                    self._qr_hardlock = True
+                    self._ip_terakhir = self._ambil_ip_publik()
                     return "gagal"
 
         # 1. PRIORITAS 5SIM: jika API key tersedia, gunakan 5SIM
@@ -1605,6 +1683,56 @@ class GmailCreator:
         except Exception as e:
             print(f"   [!] 5SIM error: {e}")
             return "skip"
+
+    def _ambil_ip_publik(self) -> str:
+        """
+        Mengambil IP publik (IP keluar proxy) dari sesi browser saat ini.
+        Mengembalikan "" jika gagal.
+        """
+        if not self.driver:
+            return ""
+
+        # 1. Coba lewat fetch pada halaman aktif
+        try:
+            ip = self.driver.execute_async_script(
+                "var cb = arguments[arguments.length - 1];"
+                "fetch('https://api.ipify.org?format=json')"
+                ".then(function(r){return r.json();})"
+                ".then(function(d){cb(d.ip);})"
+                ".catch(function(){cb('');});"
+            )
+            if ip:
+                return ip
+        except Exception:
+            pass
+
+        # 2. Fallback: buka tab baru lalu tutup lagi
+        try:
+            handle_asli = self.driver.current_window_handle
+            self.driver.switch_to.new_window("tab")
+            self.driver.get("https://api.ipify.org?format=json")
+            time.sleep(1)
+            body = self.driver.find_element(By.TAG_NAME, "body").text
+            self.driver.close()
+            self.driver.switch_to.window(handle_asli)
+            cocok = re.search(r"\d+\.\d+\.\d+\.\d+", body)
+            return cocok.group(0) if cocok else ""
+        except Exception:
+            return ""
+
+    def _catat_ip_blacklist(self):
+        """Mencatat IP yang gagal (terkunci QR) ke file blacklist."""
+        ip = self._ip_terakhir or self._ambil_ip_publik()
+        if not ip:
+            print("   [!] Tidak bisa mengambil IP untuk blacklist.")
+            return
+        path = os.path.join(os.path.dirname(__file__), "ip_blacklist.txt")
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{ip}\t{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            print(f"   [i] IP {ip} dicatat ke {path}")
+        except Exception as e:
+            print(f"   [!] Gagal mencatat IP: {e}")
 
     @staticmethod
     def _simpan_akun(akun: Akun):

@@ -17,6 +17,19 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
 ]
 
+# Daftar user-agent mobile (Android Chrome). Dipakai saat mode mobile:
+# di jalur mobile Google umumnya menawarkan verifikasi SMS (nomor telepon),
+# bukan halaman QR code.
+MOBILE_USER_AGENTS = [
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36",
+]
+
+# Viewport mobile (lebar x tinggi) untuk mode mobile
+MOBILE_WIDTH = 412
+MOBILE_HEIGHT = 915
+
 # Stealth script: menghilangkan jejak webdriver & memalsukan properti navigator
 STEALTH_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -39,17 +52,26 @@ window.navigator.permissions.query = (parameters) => (
 );
 """
 
-def buat_chrome_options(proxy: str = "") -> webdriver.ChromeOptions:
-    """Membuat ChromeOptions dengan konfigurasi anti-detection."""
+def buat_chrome_options(proxy: str = "", mobile: bool = False) -> webdriver.ChromeOptions:
+    """Membuat ChromeOptions dengan konfigurasi anti-detection.
+
+    Jika mobile=True, gunakan User-Agent & viewport mobile sehingga Google
+    cenderung menawarkan verifikasi SMS (bukan halaman QR code).
+    """
     opsi = webdriver.ChromeOptions()
-    opsi.add_argument("--start-maximized")
     opsi.add_argument("--disable-blink-features=AutomationControlled")
     opsi.add_argument("--no-sandbox")
-    opsi.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
     opsi.add_argument("--disable-extensions")
     opsi.add_argument("--disable-dev-shm-usage")
-    opsi.add_argument("--window-size=1920,1080")
-    
+
+    if mobile:
+        opsi.add_argument(f"--user-agent={random.choice(MOBILE_USER_AGENTS)}")
+        opsi.add_argument(f"--window-size={MOBILE_WIDTH},{MOBILE_HEIGHT}")
+    else:
+        opsi.add_argument("--start-maximized")
+        opsi.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
+        opsi.add_argument("--window-size=1920,1080")
+
     # Menghindari deteksi WebGL & Canvas
     opsi.add_argument("--disable-web-security")
     opsi.add_argument("--allow-running-insecure-content")

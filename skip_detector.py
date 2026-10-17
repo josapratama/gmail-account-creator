@@ -85,35 +85,58 @@ def cek_halaman_qr(driver: webdriver.Chrome) -> bool:
     Mengecek apakah halaman saat ini adalah halaman QR code verifikasi
     (belum ada input nomor telepon). Mengembalikan True jika QR terdeteksi
     dan tidak ada input tel yang terlihat.
+
+    Deteksi memakai tiga sumber: teks QR, elemen gambar/kanvas QR, dan
+    konteks URL challenge. Jika ada input nomor telepon yang terlihat,
+    halaman dianggap BUKAN halaman QR.
     """
+    # Jika ada input nomor telepon yang terlihat -> bukan halaman QR
     try:
-        # Cek URL
-        url = driver.current_url.lower()
-        if "mophneverification" not in url and "phoneverification" not in url:
-            return False
+        for inp in driver.find_elements(By.XPATH, "//input[@type='tel']"):
+            if inp.is_displayed():
+                return False
     except Exception:
         pass
 
-    # Cek apakah ada QR code / teks scan
+    # 1. Cek teks QR di body
+    ada_qr_teks = False
     try:
         body = driver.find_element(By.TAG_NAME, "body").text.lower()
-        qr_keywords = ["qr code", "scan the qr", "scan the code", "verify some info"]
-        ada_qr = any(k in body for k in qr_keywords)
+        qr_keywords = [
+            "qr code", "scan the qr", "scan the code", "scan this qr",
+            "scan to verify", "pindai kode qr", "pindai qr", "verify some info",
+        ]
+        ada_qr_teks = any(k in body for k in qr_keywords)
     except Exception:
-        ada_qr = False
+        pass
 
-    # Cek apakah ada input tel yang terlihat
-    ada_input_tel = False
+    # 2. Cek elemen gambar/kanvas QR
+    ada_qr_gambar = False
     try:
-        inputs = driver.find_elements(By.XPATH, "//input[@type='tel']")
-        for inp in inputs:
-            if inp.is_displayed():
-                ada_input_tel = True
+        imgs = driver.find_elements(
+            By.XPATH,
+            "//img[contains(@src,'qr') or contains(@alt,'QR') or contains(@alt,'qr')] | //canvas",
+        )
+        for im in imgs:
+            if im.is_displayed():
+                ada_qr_gambar = True
                 break
     except Exception:
         pass
 
-    return ada_qr and not ada_input_tel
+    # 3. Konteks URL halaman challenge/verifikasi Google
+    url_hint = False
+    try:
+        url = driver.current_url.lower()
+        url_hint = (
+            "mophneverification" in url
+            or "phoneverification" in url
+            or "challenge" in url
+        )
+    except Exception:
+        pass
+
+    return ada_qr_teks or (ada_qr_gambar and url_hint)
 
 
 def cek_halaman_error(driver: webdriver.Chrome) -> bool:

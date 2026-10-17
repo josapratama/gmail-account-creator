@@ -23,6 +23,21 @@ FIVESTIM_PRODUCT = os.getenv("FIVESTIM_PRODUCT", "google")
 # Batas waktu menunggu SMS (detik)
 SMS_TIMEOUT = int(os.getenv("SMS_TIMEOUT", "120"))
 
+# ─── SMS-ACTIVATE.ORG API (provider SMS alternatif) ────────────────────
+# Dapatkan API key di https://sms-activate.org → Profile → API key
+SMSACTIVATE_API_KEY = os.getenv("SMSACTIVATE_API_KEY", "")
+
+# Kode negara sms-activate (angka, bukan nama):
+#   0=Rusia  6=Indonesia  12=USA  16=UK  44=Kazakhstan
+#   Lihat daftar lengkap: https://sms-activate.org/en/api2#getNumberV2
+SMSACTIVATE_COUNTRY_CODE = os.getenv("SMSACTIVATE_COUNTRY_CODE", "6")  # 6 = Indonesia
+
+# ─── PILIHAN PROVIDER SMS ──────────────────────────────────────────────
+# "auto"        → coba 5SIM dulu, fallback ke sms-activate jika saldo habis/error
+# "5sim"        → hanya pakai 5SIM
+# "smsactivate" → hanya pakai sms-activate.org
+SMS_PROVIDER = os.getenv("SMS_PROVIDER", "auto")
+
 # ─── PROXY ─────────────────────────────────────────────────────────────
 # Gunakan proxy otomatis dari FreeProxy (gratis) atau daftar proxy manual.
 # Set USE_PROXY = True untuk mengaktifkan rotasi proxy.

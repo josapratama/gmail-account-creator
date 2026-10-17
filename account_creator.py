@@ -1541,11 +1541,99 @@ class GmailCreator:
         Menangani halaman verifikasi telepon.
         Strategi:
           0. Cek apakah halaman error (Google menolak membuat akun).
-          1. Jika 5SIM dikonfigurasi -> gunakan 5SIM (prioritas utama).
-          2. Jika tidak ada 5SIM -> coba klik tombol Skip.
-          3. Jika tidak ada Skip & tidak ada 5SIM -> intervensi manual.
-        Mengembalikan "skip", "5sim", atau "gagal".
+          1. Gunakan SMS provider (5SIM / sms-activate / auto-fallback).
+          2. Jika tidak ada provider -> coba klik tombol Skip.
+          3. Jika tidak ada Skip -> intervensi manual.
+        Mengembalikan "skip", "sms", atau "gagal".
         """
+        time.sleep(2)
+
+        # 0. Cek apakah halaman error (Google gagal membuat akun)
+        if cek_halaman_error(self.driver):
+            print("   [✗] Google menolak membuat akun (halaman error).")
+            print("   [i] Biasanya karena deteksi bot, proxy, atau pembatasan Google.")
+            return "gagal"
+
+        # Cek apakah ini halaman verifikasi telepon
+        is_phone_page = cek_halaman_verifikasi_telepon(self.driver)
+        if not is_phone_page:
+            if cek_halaman_error(self.driver):
+                print("   [✗] Halaman error terdeteksi.")
+                return "gagal"
+            if cek_halaman_sukses(self.driver):
+                print("   [i] Langsung ke halaman sukses (tanpa verifikasi telepon).")
+                return "skip"
+            print("   [i] Bukan halaman telepon, tunggu transisi halaman...")
+            time.sleep(3)
+            if cek_halaman_verifikasi_telepon(self.driver):
+                is_phone_page = True
+            elif cek_halaman_sukses(self.driver):
+                print("   [i] Langsung ke halaman sukses (tanpa verifikasi telepon).")
+                return "skip"
+            elif cek_halaman_error(self.driver):
+                print("   [✗] Halaman error terdeteksi.")
+                return "gagal"
+            else:
+                print("   [!] Halaman tidak teridentifikasi (bukan telepon/error/sukses).")
+                print(f"   [i] URL saat ini: {self.driver.current_url[:120]}")
+                if cek_halaman_sukses(self.driver):
+                    return "skip"
+                return "gagal"
+
+        if is_phone_page:
+            print("   [i] Halaman verifikasi telepon terdeteksi.")
+
+        # Jika halaman device-check (crossflow), beralih ke SMS dulu
+        if cek_halaman_crossflow(self.driver):
+            if not alihkan_crossflow_ke_sms(self.driver):
+                print("   [✗] Gagal melewati halaman device-check (crossflow).")
+                return "gagal"
+            time.sleep(2)
+
+        # Jika masih halaman QR, alihkan ke SMS dulu
+        if cek_halaman_qr(self.driver):
+            if not self._alihkan_qr_ke_sms():
+                print("   [!] Gagal beralih dari QR ke SMS.")
+                if cek_halaman_qr(self.driver):
+                    print("   [✗] Masih terjebak di halaman QR (tanpa alternatif).")
+                    self._qr_hardlock = True
+                    self._ip_terakhir = self._ambil_ip_publik()
+                    return "gagal"
+
+        # 1. Gunakan SMS provider jika ada key yang dikonfigurasi
+        ada_provider = bool(config.FIVESTIM_API_KEY or config.SMSACTIVATE_API_KEY)
+        if ada_provider:
+            hasil_sms = self._verifikasi_dengan_sms_provider(akun)
+            if hasil_sms == "sms":
+                return "sms"
+            elif hasil_sms == "gagal":
+                return "gagal"
+            # Jika provider gagal (skip), lanjut ke tombol Skip / manual
+
+        # 2. Coba Skip (jika ada)
+        if cari_dan_klik_skip(self.driver):
+            return "skip"
+
+        # 3. Fallback: intervensi manual
+        print("   [i] Silakan selesaikan verifikasi telepon secara manual di browser.")
+        print("       Setelah selesai, kembali ke terminal dan tekan Enter.")
+        try:
+            input()
+        except EOFError:
+            print("   [!] Mode non-interaktif: intervensi manual tidak memungkinkan.")
+            return "gagal"
+
+        time.sleep(2)
+        if cek_halaman_error(self.driver):
+            return "gagal"
+        if cek_halaman_verifikasi_telepon(self.driver):
+            print("   [✗] Verifikasi telepon belum diselesaikan (masih di halaman telepon).")
+            return "gagal"
+        if not cek_halaman_sukses(self.driver):
+            print("   [✗] Setelah intervensi manual, halaman bukan halaman sukses.")
+            print(f"   [i] URL saat ini: {self.driver.current_url[:120]}")
+            return "gagal"
+        return "skip"
         time.sleep(2)
 
         # 0. Cek apakah halaman error (Google gagal membuat akun)
@@ -1648,7 +1736,261 @@ class GmailCreator:
             return "gagal"
         return "skip"
 
-    def _verifikasi_dengan_5sim(self, akun: Akun) -> str:
+    def _verifikasi_dengan_sms_provider(self, akun: Akun) -> str:
+        """
+        Melakukan verifikasi telepon menggunakan provider SMS yang dikonfigurasi
+        (5SIM, sms-activate.org, atau auto-fallback).
+        Mengembalikan "sms" jika berhasil, "gagal" jika error, "skip" jika fallback.
+        """
+        try:
+            from sms_provider import buat_sms_provider
+            provider = buat_sms_provider()
+
+            # Jika halaman masih QR code, alihkan ke SMS dulu sebelum beli nomor
+            if cek_halaman_qr(self.driver):
+                if not self._alihkan_qr_ke_sms():
+                    print("   [!] Gagal beralih dari QR ke SMS, fallback ke skip/manual.")
+                    return "skip"
+
+            # Beli nomor
+            order = provider.beli_nomor()
+            nomor = order.get("phone")
+            order_id = order.get("id")
+            if not nomor or not order_id:
+                print("   [!] Gagal mendapatkan nomor dari provider SMS.")
+                return "skip"
+
+            # Simpan nomor ke akun
+            akun.nomor_telepon = str(nomor)
+            print(f"   [SMS] Nomor: {nomor}")
+
+            # Tunggu field telepon muncul
+            time.sleep(2)
+
+            # Masukkan nomor ke field telepon (coba beberapa selector)
+            input_telp = None
+            for telp_xpath in [
+                "//input[@name='phoneNumber']",
+                "//input[@type='tel']",
+                "//input[@aria-label*='phone' or @aria-label*='Phone' or @aria-label*='telepon' or @aria-label*='Telepon']",
+                "//input[contains(@id,'phone')]",
+                "//input[contains(@class,'phone')]",
+                "//input[@autocomplete='tel']",
+            ]:
+                try:
+                    input_telp = self._tunggu_input(telp_xpath, timeout=5)
+                    if input_telp.is_displayed():
+                        print(f"   [i] Field telepon ditemukan: {telp_xpath}")
+                        break
+                    input_telp = None
+                except Exception:
+                    continue
+
+            # Fallback: scan semua input yang terlihat
+            if input_telp is None:
+                print("   [i] Field telepon tidak ditemukan via selector, scan semua input...")
+                try:
+                    all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                    for inp in all_inputs:
+                        try:
+                            if not inp.is_displayed():
+                                continue
+                            inp_type = inp.get_attribute("type") or ""
+                            inp_name = inp.get_attribute("name") or ""
+                            inp_id = inp.get_attribute("id") or ""
+                            inp_aria = inp.get_attribute("aria-label") or ""
+                            combined = f"{inp_type} {inp_name} {inp_id} {inp_aria}".lower()
+                            if any(kw in combined for kw in ["tel", "phone", "nomor", "number"]):
+                                input_telp = inp
+                                print(f"   [i] Field telepon ditemukan via scan: name={inp_name}, type={inp_type}")
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            if input_telp is None:
+                print("   [!] Field telepon tidak ditemukan sama sekali.")
+                provider.batalkan_order(order_id)
+                return "skip"
+
+            # Bersihkan field
+            try:
+                input_telp.click()
+                input_telp.clear()
+            except Exception:
+                pass
+
+            # Tentukan nomor yang akan diinput (strip kode negara jika perlu)
+            nomor_str = str(nomor)
+            nomor_tanpa_kode = nomor_str
+            kode_negara_prefix = "+62"  # default Indonesia
+
+            # Strip kode negara umum
+            for prefix, kode in [("+62", "+62"), ("62", "+62"),
+                                   ("+1", "+1"), ("+44", "+44"),
+                                   ("+7", "+7")]:
+                if nomor_str.startswith(prefix):
+                    kode_negara_prefix = kode
+                    nomor_tanpa_kode = nomor_str[len(prefix):]
+                    break
+
+            # Cek apakah ada dropdown kode negara dan ubah ke kode yang sesuai
+            kode_negara_diubah = False
+            try:
+                country_selectors = [
+                    "//div[contains(@class,'country')]//div[contains(@role,'button')]",
+                    "//div[contains(@jsname,'country')]",
+                    "//div[contains(text(),'+1')]",
+                    "//span[contains(text(),'+1')]",
+                ]
+                for sel in country_selectors:
+                    try:
+                        el = self.driver.find_element(By.XPATH, sel)
+                        if el.is_displayed():
+                            el.click()
+                            tunggu_acak(0.5, 1.0)
+                            # Cari opsi sesuai kode negara nomor
+                            for opt_sel in [
+                                f"//div[contains(text(),'{kode_negara_prefix}')]",
+                                f"//span[contains(text(),'{kode_negara_prefix}')]",
+                            ]:
+                                try:
+                                    opt = self.driver.find_element(By.XPATH, opt_sel)
+                                    if opt.is_displayed():
+                                        opt.click()
+                                        kode_negara_diubah = True
+                                        print(f"   [i] Kode negara diubah ke {kode_negara_prefix}")
+                                        break
+                                except Exception:
+                                    continue
+                            if kode_negara_diubah:
+                                break
+                            try:
+                                el.click()
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            tunggu_acak(0.3, 0.6)
+
+            nomor_untuk_input = nomor_tanpa_kode if kode_negara_diubah else nomor_str
+            print(f"   [i] Memasukkan nomor: {nomor_untuk_input}")
+            try:
+                self._bersihkan_field(input_telp)
+                self._ketik_aman(input_telp, nomor_untuk_input, human_like=True)
+            except Exception:
+                self.driver.execute_script(
+                    "arguments[0].value = arguments[1];"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                    input_telp, nomor_untuk_input,
+                )
+            tunggu_acak(0.5, 1.0)
+
+            # Klik Next/Send kode
+            next_diklik = False
+            for next_xpath in [
+                "//div[@id='phoneNumberNext']//button",
+                "//button[contains(.,'Next')]",
+                "//button[contains(.,'Berikutnya')]",
+                "//button[contains(.,'Send')]",
+                "//button[contains(.,'Kirim')]",
+            ]:
+                try:
+                    self._klik(next_xpath, timeout=8)
+                    next_diklik = True
+                    break
+                except Exception:
+                    continue
+
+            if not next_diklik:
+                print("   [!] Tombol Next/Send tidak ditemukan.")
+                provider.batalkan_order(order_id)
+                return "skip"
+
+            tunggu_acak(2, 3)
+
+            # Cek apakah ada error setelah memasukkan nomor
+            if cek_halaman_error(self.driver):
+                print("   [✗] Google menolak nomor telepon (halaman error).")
+                provider.batalkan_order(order_id)
+                return "gagal"
+
+            # Tunggu kode SMS dari provider
+            kode = provider.tunggu_sms(order_id)
+            if not kode:
+                print("   [!] Tidak menerima kode SMS dari provider.")
+                provider.batalkan_order(order_id)
+                return "skip"
+
+            print(f"   [SMS] Kode verifikasi: {kode}")
+
+            # Masukkan kode verifikasi
+            kode_terisi = False
+            for kode_xpath in [
+                "//input[@name='code']",
+                "//input[@aria-label*='code' or @aria-label*='Code' or @aria-label*='verifikasi' or @aria-label*='Verification']",
+                "//input[contains(@id,'code')]",
+                "//input[@type='tel']",
+                "//input[@type='text']",
+            ]:
+                try:
+                    input_kode = self._tunggu_input(kode_xpath, timeout=8)
+                    if input_kode.is_displayed():
+                        self._bersihkan_field(input_kode)
+                        try:
+                            self._ketik_aman(input_kode, str(kode), human_like=True)
+                        except Exception:
+                            self.driver.execute_script(
+                                "arguments[0].value = arguments[1];"
+                                "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                                "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                                input_kode, str(kode),
+                            )
+                        kode_terisi = True
+                        break
+                except Exception:
+                    continue
+
+            if not kode_terisi:
+                print("   [!] Field kode verifikasi tidak ditemukan.")
+                provider.batalkan_order(order_id)
+                return "skip"
+
+            tunggu_acak(0.5, 1.0)
+
+            # Klik Verify/Next
+            for verify_xpath in [
+                "//button[contains(.,'Verify')]",
+                "//button[contains(.,'Verifikasi')]",
+                "//button[contains(.,'Next')]",
+                "//button[contains(.,'Berikutnya')]",
+            ]:
+                try:
+                    self._klik(verify_xpath, timeout=8)
+                    break
+                except Exception:
+                    continue
+
+            tunggu_acak(2, 3)
+
+            # Cek hasil
+            if cek_halaman_error(self.driver):
+                print("   [✗] Verifikasi kode gagal (halaman error).")
+                provider.batalkan_order(order_id)
+                return "gagal"
+
+            provider.selesaikan_order(order_id)
+            print("   [✓] Verifikasi telepon via SMS provider berhasil!")
+            return "sms"
+
+        except Exception as e:
+            print(f"   [!] SMS provider error: {e}")
+            return "skip"
         """
         Melakukan verifikasi telepon menggunakan 5SIM.
         Mengembalikan "5sim" jika berhasil, "gagal" jika error, "skip" jika harus fallback.

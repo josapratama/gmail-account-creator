@@ -6,8 +6,9 @@ import os
 
 from dotenv import load_dotenv
 
-# Load environment variables dari file .env (jika ada)
-load_dotenv()
+# Load environment variables dari file .env di direktori yang sama dengan script ini
+# (bukan dari current working directory, agar tetap berfungsi walau dijalankan dari folder lain)
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # ─── 5SIM API (untuk verifikasi telepon virtual) ───────────────────────
 # Dapatkan API key di https://5sim.net
@@ -35,6 +36,12 @@ MANUAL_PROXY = os.getenv("MANUAL_PROXY", "")
 HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
 # Apakah mode anti-detection diaktifkan (stealth JS, dll)
 ANTI_DETECTION = os.getenv("ANTI_DETECTION", "true").lower() == "true"
+
+# ─── BROWSER BEHAVIOR ──────────────────────────────────────────────────
+# Apakah browser dibiarkan terbuka setelah akun selesai dibuat.
+# False (default) = browser langsung ditutup, cocok untuk bulk mode.
+# True = browser tetap terbuka sampai Ctrl+C, cocok untuk debugging.
+KEEP_BROWSER_OPEN = os.getenv("KEEP_BROWSER_OPEN", "false").lower() == "true"
 
 # ─── SESSION WARMING ───────────────────────────────────────────────────
 # Jumlah halaman acak yang dikunjungi sebelum pendaftaran (untuk pemanasan)

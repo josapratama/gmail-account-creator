@@ -72,9 +72,6 @@ def buat_chrome_options(proxy: str = "", mobile: bool = False) -> webdriver.Chro
         opsi.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
         opsi.add_argument("--window-size=1920,1080")
 
-    # Menghindari deteksi WebGL & Canvas
-    opsi.add_argument("--disable-web-security")
-    opsi.add_argument("--allow-running-insecure-content")
     opsi.add_argument("--disable-infobars")
     
     opsi.add_experimental_option("excludeSwitches", ["enable-automation"])

@@ -17,6 +17,7 @@ Environment variables opsional:
   USE_PROXY=true     - Aktifkan proxy gratis dari FreeProxy
   MANUAL_PROXY=host:port - Proxy manual
   HEADLESS=true      - Mode headless (tanpa jendela browser)
+  KEEP_BROWSER_OPEN=true - Biarkan browser terbuka setelah akun selesai (debugging)
   WARMUP_PAGES=3     - Jumlah halaman pemanasan sesi
 """
 import sys

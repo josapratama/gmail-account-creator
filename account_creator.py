@@ -81,6 +81,18 @@ class GmailCreator:
                     for arg in opsi.arguments:
                         uc_options.add_argument(arg)
 
+                    # Copy experimental options (prefs) dari opsi asli.
+                    # useAutomationExtension & excludeSwitches tidak diteruskan ke UC:
+                    # keduanya sudah ditangani internal UC dan sebagian versi
+                    # chromedriver menolaknya ("unrecognized chrome option").
+                    try:
+                        for key, value in opsi._experimental_options.items():
+                            if key in ("useAutomationExtension", "excludeSwitches"):
+                                continue
+                            uc_options.add_experimental_option(key, value)
+                    except Exception:
+                        pass
+
                     if config.HEADLESS:
                         uc_options.add_argument("--headless=new")
 
@@ -238,6 +250,35 @@ class GmailCreator:
             pass
         return el
 
+    def _isi_via_js(self, xpath, nilai):
+        """
+        Fallback saat `element not interactable`: set nilai input langsung via
+        JavaScript (native value setter) lalu trigger event input/change/blur.
+        """
+        try:
+            return self.driver.execute_script(
+                """
+                var el = document.evaluate(arguments[0], document, null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                if (!el) return false;
+                el.scrollIntoView({block: 'center'});
+                el.focus();
+                var proto = el.tagName === 'TEXTAREA'
+                    ? window.HTMLTextAreaElement.prototype
+                    : window.HTMLInputElement.prototype;
+                var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                setter.call(el, String(arguments[1]));
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new Event('blur', {bubbles: true}));
+                return el.value;
+                """,
+                xpath, str(nilai),
+            )
+        except Exception as e:
+            print(f"   [!] JS isi '{xpath}' gagal: {e}")
+            return None
+
     def _klik(self, xpath, timeout=30):
         """Klik elemen. Bisa menerima string tunggal atau list XPATH."""
         el = None
@@ -268,19 +309,6 @@ class GmailCreator:
             el.click()
         except Exception:
             self.driver.execute_script("arguments[0].click();", el)
-        return el
-
-    def _klik_next_dan_tunggu(self, xpath, timeout=30):
-        """Klik tombol Next lalu tunggu URL berubah (indikator halaman berpindah)."""
-        url_awal = self.driver.current_url
-        el = self._klik(xpath, timeout)
-        # Tunggu URL berubah atau timeout
-        try:
-            WebDriverWait(self.driver, 15).until(
-                lambda d: d.current_url != url_awal
-            )
-        except Exception:
-            pass
         return el
 
     def _interaksi_manusia(self):
@@ -469,6 +497,119 @@ class GmailCreator:
 
         return False
 
+    def _isi_input_tanggal(self, xpaths, nilai, label, percobaan=3):
+        """
+        Mengisi input tanggal Google (type=tel) dengan retry.
+        Elemen ini kadang belum siap saat halaman baru bertransisi sehingga
+        memunculkan 'element not interactable'; karena itu dilakukan pengecekan
+        nilai dan fallback via JavaScript.
+        """
+        nilai = str(nilai)
+        gabung = " | ".join(xpaths)
+        try:
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, gabung)))
+        except Exception:
+            print(f"   [!] Field {label} tidak muncul di halaman.")
+            return False
+
+        for kali in range(percobaan):
+            el = None
+            for xp in xpaths:
+                try:
+                    kandidat = self.driver.find_element(By.XPATH, xp)
+                    if kandidat.is_displayed():
+                        el = kandidat
+                        break
+                except Exception:
+                    continue
+
+            if el is None:
+                tunggu_acak(1, 1.5)
+                continue
+
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", el)
+                tunggu_acak(0.2, 0.4)
+                try:
+                    el.click()
+                except Exception:
+                    self.driver.execute_script("arguments[0].click();", el)
+                el.send_keys(Keys.CONTROL, "a")
+                el.send_keys(Keys.BACKSPACE)
+                ketik_manusia(el, nilai)
+                tunggu_acak(0.3, 0.6)
+            except Exception as e:
+                print(f"   [i] Input {label} normal gagal ({str(e).splitlines()[0]}); fallback JS.")
+
+            try:
+                if (el.get_attribute("value") or "").strip() == nilai:
+                    return True
+            except Exception:
+                pass
+
+            self._isi_via_js(xpaths[0], nilai)
+            tunggu_acak(0.4, 0.8)
+            try:
+                if (el.get_attribute("value") or "").strip() == nilai:
+                    return True
+            except Exception:
+                pass
+            tunggu_acak(0.5, 1)
+
+        print(f"   [!] Gagal mengisi {label} setelah {percobaan} percobaan.")
+        return False
+
+    def _pilih_dropdown_material(self, container_xpath, nilai, opsi_teks=None):
+        """
+        Memilih dropdown bergaya Material Google (div trigger + <li role="option">),
+        seperti #month dan #gender pada halaman tanggal lahir. Opsi dipilih
+        berdasarkan atribut data-value, lalu fallback ke teks opsi.
+        """
+        opsi_teks = [t.strip().lower() for t in (opsi_teks or [])]
+        try:
+            container = self._tunggu_input(container_xpath, timeout=10)
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", container)
+            tunggu_acak(0.3, 0.5)
+            try:
+                container.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", container)
+            tunggu_acak(0.8, 1.2)
+
+            opsi = self.driver.find_elements(
+                By.XPATH, f"{container_xpath}//li[@role='option']")
+            if not opsi:
+                opsi = self.driver.find_elements(By.XPATH, '//li[@role="option"]')
+            if not opsi:
+                return False
+
+            target = None
+            for o in opsi:
+                if (o.get_attribute("data-value") or "").strip() == str(nilai):
+                    target = o
+                    break
+            if target is None and opsi_teks:
+                for o in opsi:
+                    if (o.text or "").strip().lower() in opsi_teks:
+                        target = o
+                        break
+            if target is None:
+                print(f"   [!] Opsi '{nilai}' tidak ditemukan pada {container_xpath}")
+                return False
+
+            try:
+                target.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", target)
+            tunggu_acak(0.4, 0.8)
+            return True
+        except Exception as e:
+            print(f"   [!] Dropdown material '{container_xpath}' gagal: {str(e).splitlines()[0]}")
+            return False
+
     def _cek_gender_terpilih(self) -> bool:
         """Cek apakah gender sudah terpilih (tidak kosong/placeholder)."""
         try:
@@ -478,13 +619,17 @@ class GmailCreator:
                 val = select_el[0].get_attribute("value")
                 if val and val != "" and val.lower() not in ("", "placeholder", "select"):
                     return True
-            # Cek teks pada custom dropdown (jangan kosong atau "Gender")
-            gender_container = self.driver.find_elements(By.XPATH, '//*[@id="gender"]')
-            if gender_container:
-                txt = (gender_container[0].text or "").strip()
-                # Placeholder biasanya "Gender" atau kosong
-                if txt and txt.lower() not in ("gender", "select gender", "pilih gender", ""):
-                    return True
+            # Cek opsi terpilih pada dropdown Material / teks pada container
+            hasil = self.driver.execute_script("""
+                var g = document.querySelector('#gender');
+                if (!g) return '';
+                var sel = g.querySelector('[role="option"][aria-selected="true"]');
+                if (sel) return (sel.innerText || '').trim();
+                return (g.innerText || '').trim();
+            """)
+            hasil = (hasil or "").strip()
+            if hasil and hasil.lower() not in ("gender", "select gender", "pilih gender"):
+                return True
         except Exception:
             pass
         return False
@@ -495,10 +640,10 @@ class GmailCreator:
         Mendukung native <select> dan custom dropdown.
         """
         gender_target = {
-            1: ["male", "laki-laki", "laki laki"],
-            2: ["female", "perempuan"],
-            3: ["rather not say", "tidak ingin menyebutkan", "rather"],
-            4: ["custom", "kustom"],
+            1: ["male"],
+            2: ["female"],
+            3: ["rather not say", "rather"],
+            4: ["custom"],
         }
         keywords = gender_target.get(gender_val, ["male"])
 
@@ -510,10 +655,10 @@ class GmailCreator:
                 if (sel) {{
                     var opts = sel.options;
                     for (var i = 0; i < opts.length; i++) {{
-                        var v = (opts[i].value || '').toLowerCase();
-                        var t = (opts[i].text || '').toLowerCase();
+                        var v = (opts[i].value || '').trim().toLowerCase();
+                        var t = (opts[i].text || '').trim().toLowerCase();
                         for (var k = 0; k < keywords.length; k++) {{
-                            if (v.indexOf(keywords[k]) !== -1 || t.indexOf(keywords[k]) !== -1) {{
+                            if (v === keywords[k] || t === keywords[k]) {{
                                 sel.selectedIndex = i;
                                 sel.dispatchEvent(new Event('change', {{bubbles: true}}));
                                 sel.dispatchEvent(new Event('input', {{bubbles: true}}));
@@ -534,11 +679,11 @@ class GmailCreator:
                 tunggu_acak(0.6, 1.0)
                 clicked = self.driver.execute_script(f"""
                     var keywords = {json.dumps(keywords)};
-                    var opts = document.querySelectorAll('[role="option"], [role="listitem"], .VfPpkd-StrnGf');
+                    var opts = document.querySelectorAll('#gender [role="option"], [role="option"]');
                     for (var i = 0; i < opts.length; i++) {{
                         var t = (opts[i].textContent || '').trim().toLowerCase();
                         for (var k = 0; k < keywords.length; k++) {{
-                            if (t.indexOf(keywords[k]) !== -1) {{
+                            if (t === keywords[k]) {{
                                 opts[i].click();
                                 return 'option-clicked:' + t;
                             }}
@@ -621,17 +766,10 @@ class GmailCreator:
                     pass
                 raise Exception("Field username tidak ditemukan dan gagal pilih saran")
 
-            # 3. Isi username menggunakan fungsi _isi yang sudah ditingkatkan
+            # 3. Isi username menggunakan fungsi _isi
+            #    _isi sudah menangani: scroll, klik, clear (select-all + delete), ketik, dispatch event
             self._isi(el, username, human_like=True)
-            # Karena el sudah didapat, kita bisa pakai direct send_keys jika _isi gagal mendapatkan xpath
-            try:
-                # Clear ulang untuk memastikan
-                el.send_keys(Keys.CONTROL, "a")
-                el.send_keys(Keys.BACKSPACE)
-                ketik_manusia(el, username)
-            except Exception:
-                pass
-            
+
             tunggu_acak(0.5, 1.0)
 
             # 4. Klik Next
@@ -685,7 +823,6 @@ class GmailCreator:
             "that username is taken",
             "username sudah",
             "sudah digunakan",
-            "taken",
             "try another",
             "coba yang lain",
         ]
@@ -781,8 +918,9 @@ class GmailCreator:
             print("[i] Melewati akun ini dan mencatat IP ke blacklist.")
             self._catat_ip_blacklist()
 
-        # Biarkan browser tetap terbuka untuk inspeksi manual (mode non-headless)
-        if not config.HEADLESS and self.driver:
+        # Biarkan browser terbuka hanya jika diminta via KEEP_BROWSER_OPEN.
+        # Default False agar bulk mode tidak menggantung setelah setiap akun.
+        if config.KEEP_BROWSER_OPEN and not config.HEADLESS and self.driver:
             print("\nBrowser dibiarkan terbuka. Tekan Ctrl+C untuk menutup.")
             try:
                 while True:
@@ -850,8 +988,27 @@ class GmailCreator:
             tunggu_acak(0.5, 1.0)
             self._isi(last_name_xpaths, akun.nama_belakang)
             tunggu_acak(0.8, 1.5)
+
+            # Verifikasi field nama benar-benar terisi; isi ulang via JS kalau kosong
+            for xp_list, nilai in ((first_name_xpaths, akun.nama_depan),
+                                   (last_name_xpaths, akun.nama_belakang)):
+                try:
+                    el = None
+                    for xp in xp_list:
+                        try:
+                            kandidat = self.driver.find_element(By.XPATH, xp)
+                            if kandidat.is_displayed():
+                                el = kandidat
+                                break
+                        except Exception:
+                            continue
+                    if el is not None and not (el.get_attribute("value") or "").strip():
+                        print("   [i] Field nama kosong, isi ulang via JS...")
+                        self._isi_via_js(xp_list[0], nilai)
+                except Exception:
+                    pass
             
-            # Klik Next dan tunggu URL berubah
+            # Klik Next dan tunggu URL benar-benar berubah (transisi Google bisa lambat)
             url_sebelum = self.driver.current_url
             next_diklik = False
             next_xpaths = [
@@ -860,140 +1017,123 @@ class GmailCreator:
                 '//button[contains(.,"Berikutnya")]',
                 '//span[contains(.,"Next")]/ancestor::button',
             ]
-            
-            try:
-                self._klik(next_xpaths, timeout=10)
-                tunggu_acak(2, 3)
-                if self.driver.current_url != url_sebelum:
-                    next_diklik = True
-            except Exception:
-                pass
-                
-            if not next_diklik:
-                print("   [!] Tombol Next nama tidak merespon, coba klik via JS...")
+
+            for percobaan in range(3):
                 try:
-                    self.driver.execute_script(
-                        "document.querySelector('#collectNameNext button')?.click();"
-                    )
-                    tunggu_acak(2, 3)
+                    self._klik(next_xpaths, timeout=10)
                 except Exception:
                     pass
+                # Tunggu sampai URL berubah (maks 15 detik)
+                try:
+                    WebDriverWait(self.driver, 15).until(
+                        lambda d: d.current_url != url_sebelum
+                    )
+                    next_diklik = True
+                    break
+                except Exception:
+                    print(f"   [i] URL belum berubah setelah klik Next ({percobaan + 1}/3), ulangi...")
+                    try:
+                        self.driver.execute_script(
+                            "document.querySelector('#collectNameNext button')?.click();"
+                        )
+                    except Exception:
+                        pass
+
+            if not next_diklik:
+                print("   [!] Gagal lanjut dari tahap nama (URL tidak berubah).")
             tunggu_acak(1, 2)
 
             # ── Langkah 2: Tanggal lahir & gender ──
             print("[2/6] Mengisi tanggal lahir & gender...")
             self._interaksi_manusia()
             try:
-                # Day & Year: isi langsung tanpa clear (mirip Google input)
-                day_el = WebDriverWait(self.driver, 15).until(
-                    EC.presence_of_element_located((By.XPATH, '//*[@id="day"]'))
-                )
-                day_el.send_keys(str(config.DEFAULT_BIRTH_DAY))
+                # Pastikan halaman tanggal lahir benar-benar tampil
+                try:
+                    WebDriverWait(self.driver, 20).until(
+                        EC.presence_of_element_located(
+                            (By.XPATH, '//*[@id="day"] | //input[@name="day"]'))
+                    )
+                except Exception:
+                    print(f"   [!] Halaman tanggal lahir tidak muncul. URL: {self.driver.current_url}")
+                    raise
+
+                # Day & Year: input type=tel; retry + fallback JS bila belum siap
+                self._isi_input_tanggal(
+                    ['//input[@name="day"]', '//*[@id="day"]'],
+                    config.DEFAULT_BIRTH_DAY, "tanggal (day)")
                 tunggu_acak(0.3, 0.6)
 
-                # Month: native <select> di dalam #month (coba berbagai format nilai)
+                # Month: dropdown Material (#month) — coba native select dulu, lalu custom
                 month_berhasil = False
                 try:
-                    month_select = Select(WebDriverWait(self.driver, 10).until(
-                        EC.presence_of_element_located((By.XPATH, '//*[@id="month"]//select'))
-                    ))
-                    # Google bisa pakai nilai angka (1-12), nama bulan, atau singkatan
-                    month_num = config.DEFAULT_BIRTH_MONTH
-                    month_kandidat = [
-                        str(month_num),
-                        str(month_num - 1),  # beberapa versi pakai 0-indexed
-                        calendar.month_name[month_num],
-                        calendar.month_abbr[month_num],
-                        calendar.month_name[month_num].lower(),
-                    ]
-                    for val in month_kandidat:
+                    month_select = Select(self._tunggu_input('//*[@id="month"]//select', timeout=4))
+                    for val in (
+                        str(config.DEFAULT_BIRTH_MONTH),
+                        calendar.month_name[config.DEFAULT_BIRTH_MONTH],
+                        calendar.month_abbr[config.DEFAULT_BIRTH_MONTH],
+                    ):
                         try:
                             month_select.select_by_value(val)
                             month_berhasil = True
                             break
                         except Exception:
                             continue
-                    if not month_berhasil:
-                        # Coba visible text
-                        for txt in [calendar.month_name[month_num]]:
-                            try:
-                                month_select.select_by_visible_text(txt)
-                                month_berhasil = True
-                                break
-                            except Exception:
-                                continue
                 except Exception:
                     pass
 
                 if not month_berhasil:
-                    self._pilih_dropdown_google(
+                    month_berhasil = self._pilih_dropdown_material(
                         '//*[@id="month"]',
                         config.DEFAULT_BIRTH_MONTH,
                         opsi_teks=[calendar.month_name[config.DEFAULT_BIRTH_MONTH]],
                     )
+                if not month_berhasil:
+                    month_berhasil = self._pilih_dropdown_google(
+                        '//*[@id="month"]',
+                        config.DEFAULT_BIRTH_MONTH,
+                        opsi_teks=[calendar.month_name[config.DEFAULT_BIRTH_MONTH]],
+                    )
+                print(f"   [{'i' if month_berhasil else '!'}] Bulan {'terpilih' if month_berhasil else 'GAGAL dipilih'}")
                 tunggu_acak(0.3, 0.6)
 
-                year_el = WebDriverWait(self.driver, 15).until(
-                    EC.presence_of_element_located((By.XPATH, '//*[@id="year"]'))
-                )
-                year_el.send_keys(str(config.DEFAULT_BIRTH_YEAR))
+                self._isi_input_tanggal(
+                    ['//input[@name="year"]', '//*[@id="year"]'],
+                    config.DEFAULT_BIRTH_YEAR, "tahun (year)")
                 tunggu_acak(0.3, 0.6)
 
-                # Gender: native <select> di dalam #gender (coba berbagai format nilai)
+                # Gender: dropdown Material (#gender) — coba native select dulu, lalu custom
+                gender_map = {
+                    1: ["male", "laki-laki", "laki laki"],
+                    2: ["female", "perempuan"],
+                    3: ["rather not say", "tidak ingin menyebutkan"],
+                    4: ["custom", "kustom"],
+                }
                 gender_berhasil = False
                 try:
-                    gender_select = Select(WebDriverWait(self.driver, 8).until(
-                        EC.presence_of_element_located((By.XPATH, '//*[@id="gender"]//select'))
-                    ))
-                    # Google bisa pakai nilai angka (1,2,3,4) atau string (male/female/...)
-                    gender_values = {
-                        1: ["1", "male", "MALE", "Male"],
-                        2: ["2", "female", "FEMALE", "Female"],
-                        3: ["3", "rather_not_say", "RATHER_NOT_SAY", "Rather not say", "rather"],
-                        4: ["4", "custom", "CUSTOM", "Custom"],
-                    }
-                    for val in gender_values.get(config.DEFAULT_GENDER, [str(config.DEFAULT_GENDER)]):
+                    gender_select = Select(self._tunggu_input('//*[@id="gender"]//select', timeout=4))
+                    for val in (str(config.DEFAULT_GENDER),):
                         try:
                             gender_select.select_by_value(val)
                             gender_berhasil = True
-                            print(f"   [i] Gender dipilih via native select (value={val})")
                             break
                         except Exception:
                             continue
-                    if not gender_berhasil:
-                        # Coba select by visible text
-                        gender_texts = {
-                            1: ["Male", "Laki-laki", "Laki laki"],
-                            2: ["Female", "Perempuan"],
-                            3: ["Rather not say", "Tidak ingin menyebutkan"],
-                            4: ["Custom", "Kustom"],
-                        }
-                        for txt in gender_texts.get(config.DEFAULT_GENDER, []):
-                            try:
-                                gender_select.select_by_visible_text(txt)
-                                gender_berhasil = True
-                                print(f"   [i] Gender dipilih via visible text ({txt})")
-                                break
-                            except Exception:
-                                continue
                 except Exception:
                     pass
 
                 if not gender_berhasil:
-                    print("   [i] Native select gender tidak ada, coba custom dropdown...")
-                    gender_map = {
-                        1: ["male", "laki"],
-                        2: ["female", "perempuan"],
-                        3: ["rather", "tidak ingin"],
-                        4: ["custom", "kustom"],
-                    }
+                    gender_berhasil = self._pilih_dropdown_material(
+                        '//*[@id="gender"]',
+                        config.DEFAULT_GENDER,
+                        opsi_teks=gender_map.get(config.DEFAULT_GENDER, []),
+                    )
+                if not gender_berhasil:
                     gender_berhasil = self._pilih_dropdown_google(
                         '//*[@id="gender"]',
                         config.DEFAULT_GENDER,
                         opsi_teks=gender_map.get(config.DEFAULT_GENDER, []),
                     )
-                    if gender_berhasil:
-                        print("   [i] Gender dipilih via custom dropdown")
+                print(f"   [{'i' if gender_berhasil else '!'}] Gender {'terpilih' if gender_berhasil else 'GAGAL dipilih'}")
 
                 # Verifikasi gender sudah terpilih, jika belum coba JS direct
                 if not self._cek_gender_terpilih():
@@ -1002,12 +1142,25 @@ class GmailCreator:
                     tunggu_acak(0.3, 0.6)
                 tunggu_acak(0.5, 1)
 
-                # Klik Next
-                next_btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, '//*[@id="birthdaygenderNext"]/div/button'))
-                )
-                next_btn.click()
-                tunggu_acak(2, 3)
+                # Klik Next dan tunggu URL benar-benar berubah
+                url_sebelum = self.driver.current_url
+                next_xpaths = [
+                    '//*[@id="birthdaygenderNext"]/div/button',
+                    '//button[.//span[contains(text(),"Next") or contains(text(),"Berikutnya")]]',
+                ]
+                for percobaan in range(3):
+                    try:
+                        self._klik(next_xpaths, timeout=10)
+                    except Exception as e:
+                        print(f"   [!] Klik Next percobaan {percobaan + 1} gagal: {str(e).splitlines()[0]}")
+                    try:
+                        WebDriverWait(self.driver, 15).until(
+                            lambda d: d.current_url != url_sebelum
+                        )
+                        break
+                    except Exception:
+                        print(f"   [i] URL belum berubah, ulangi klik Next ({percobaan + 1}/3)...")
+                tunggu_acak(1, 2)
             except Exception as e:
                 print(f"   [!] Lewati tahap tanggal lahir: {e}")
 

@@ -80,9 +80,10 @@ def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 30) -> boo
     karena mendeteksi HP aktif di jaringan yang sama (hotspot).
 
     Strategi bertingkat:
-      1. Tunggu halaman fully loaded, lalu cari tombol "Use a phone number instead".
-      2. Jika tidak ada, cari & klik "Continue" dan tunggu redirect ke SMS/sukses.
-      3. Jika masih crossflow setelah "Continue", tampilkan instruksi manual.
+      1. Tunggu halaman fully loaded, dump semua link/tombol + seluruh teks halaman
+      2. Cari tombol 'Use a phone number instead' via teks maupun href
+      3. Klik 'Continue', tunggu redirect otomatis dari HP (maks 60 detik)
+      4. Fallback manual: instruksi ke pengguna
 
     Mengembalikan True jika berhasil keluar dari halaman crossflow.
     """
@@ -102,54 +103,80 @@ def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 30) -> boo
 
     # Scroll perlahan ke bawah agar konten lazy-load muncul
     try:
-        for _ in range(3):
-            driver.execute_script("window.scrollBy(0, 300);")
-            time.sleep(0.5)
+        for _ in range(5):
+            driver.execute_script("window.scrollBy(0, 200);")
+            time.sleep(0.4)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
     except Exception:
         pass
 
-    # Log semua teks tombol untuk debugging
+    # Dump seluruh teks halaman + semua link/tombol untuk debug
+    try:
+        body_teks = driver.find_element(By.TAG_NAME, "body").text
+        print(f"   [DEBUG] Teks halaman:\n---\n{body_teks[:800]}\n---")
+    except Exception:
+        pass
+
+    try:
+        semua_links = driver.find_elements(By.XPATH, "//a")
+        for lnk in semua_links:
+            try:
+                href = lnk.get_attribute("href") or ""
+                teks = (lnk.text or "").strip()
+                if href or teks:
+                    print(f"   [DEBUG] Link: '{teks}' -> {href[:80]}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     try:
         semua_tombol = driver.find_elements(
-            By.XPATH, "//button | //a | //div[@role='button'] | //span[@role='button']")
-        teks_tombol = [
-            (el.text or el.get_attribute("aria-label") or "").strip()
-            for el in semua_tombol
-            if el.is_displayed() and (el.text or el.get_attribute("aria-label") or "").strip()
-        ]
+            By.XPATH, "//button | //div[@role='button'] | //span[@role='button']")
+        teks_tombol = []
+        for el in semua_tombol:
+            try:
+                if el.is_displayed():
+                    t = (el.text or el.get_attribute("aria-label") or "").strip()
+                    if t:
+                        teks_tombol.append(t)
+            except Exception:
+                pass
         print(f"   [i] Tombol yang terdeteksi: {teks_tombol}")
     except Exception:
         pass
 
-    # ── Strategi 1: cari tombol "Use phone number instead" ──────────────
+    # ── Strategi 1: cari tombol/link "Use phone number instead" ─────────
     keywords_sms = [
         "use a phone number instead",
         "use phone number instead",
         "phone number instead",
+        "phone number",
         "try another way",
         "another way",
         "cara lain",
         "nomor telepon",
         "use phone",
+        "verifikasi dengan nomor",
     ]
+
+    # Cek semua elemen termasuk yang hidden (pakai JS untuk klik)
     try:
         semua_el = driver.find_elements(
-            By.XPATH, "//button | //a | //div[@role='button'] | //span[@role='button']")
+            By.XPATH,
+            "//button | //a | //div[@role='button'] | //span[@role='button'] | //div[@jsname]",
+        )
         for el in semua_el:
             try:
-                if not el.is_displayed():
-                    continue
                 teks = (el.text or "").strip().lower()
                 aria = (el.get_attribute("aria-label") or "").strip().lower()
-                combined = f"{teks} {aria}"
+                href = (el.get_attribute("href") or "").lower()
+                combined = f"{teks} {aria} {href}"
                 if any(k in combined for k in keywords_sms):
                     print(f"   [✓] Menemukan opsi SMS: '{el.text.strip() or aria}'")
-                    try:
-                        el.click()
-                    except Exception:
-                        driver.execute_script("arguments[0].click();", el)
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
                     tunggu_acak(2, 3)
                     if not cek_halaman_crossflow(driver):
                         return True
@@ -158,10 +185,10 @@ def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 30) -> boo
     except Exception:
         pass
 
-    # ── Strategi 2: klik "Continue" dan tunggu redirect ─────────────────
-    # Google akan redirect ke HP untuk verifikasi, lalu kembali ke browser
-    keywords_continue = ["continue", "lanjutkan", "next", "berikutnya", "ok"]
+    # ── Strategi 2: klik "Continue" dan tunggu redirect dari HP ─────────
+    keywords_continue = ["continue", "lanjutkan", "next", "berikutnya"]
     print("   [i] Tombol SMS tidak ada, mencoba klik 'Continue' dan tunggu redirect...")
+
     try:
         semua_el = driver.find_elements(
             By.XPATH, "//button | //div[@role='button'] | //span[@role='button']")
@@ -178,16 +205,22 @@ def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 30) -> boo
                         el.click()
                     except Exception:
                         driver.execute_script("arguments[0].click();", el)
-                    # Tunggu redirect dari HP (maks 60 detik)
-                    print("   [i] Menunggu verifikasi dari HP (maks 60 detik)...")
-                    batas = time.time() + 60
+
+                    # Tunggu redirect dari HP (maks 90 detik)
+                    print("   [i] Menunggu verifikasi dari HP (buka HP Anda, maks 90 detik)...")
+                    batas = time.time() + 90
+                    url_awal = driver.current_url
                     while time.time() < batas:
-                        if not cek_halaman_crossflow(driver):
-                            print("   [✓] Halaman berubah setelah device check!")
+                        try:
+                            url_kini = driver.current_url
+                        except Exception:
+                            break
+                        if url_kini != url_awal and not cek_halaman_crossflow(driver):
+                            print(f"   [✓] Redirect terjadi: {url_kini[:80]}")
                             return True
                         sisa = int(batas - time.time())
-                        if sisa % 10 == 0 and sisa > 0:
-                            print(f"   [i] Menunggu HP menyelesaikan verifikasi... ({sisa}s)")
+                        if sisa % 15 == 0 and sisa > 0:
+                            print(f"   [i] Masih menunggu HP... ({sisa}s tersisa)")
                         time.sleep(1)
                     break
             except Exception:
@@ -198,15 +231,17 @@ def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 30) -> boo
     # ── Strategi 3: instruksi manual ────────────────────────────────────
     if not config.HEADLESS:
         print()
-        print("   [?] ══════════════════════════════════════════════")
-        print("   [?]  AKSI MANUAL DIPERLUKAN DI BROWSER:")
-        print("   [?]  Google meminta verifikasi via HP.")
-        print("   [?]  Buka HP Anda, selesaikan verifikasi,")
-        print("   [?]  lalu kembali ke sini dan tekan Enter.")
-        print("   [?] ══════════════════════════════════════════════")
+        print("   [?] ══════════════════════════════════════════════════")
+        print("   [?]  AKSI MANUAL DIPERLUKAN:")
+        print("   [?]  1. Buka HP Anda → cek notifikasi Google")
+        print("   [?]  2. Selesaikan verifikasi di HP")
+        print("   [?]  3. Kembali ke sini dan tekan Enter")
+        print("   [?]  — ATAU —")
+        print("   [?]  Matikan Mode Pesawat HP → nyalakan ulang → coba lagi")
+        print("   [?] ══════════════════════════════════════════════════")
         try:
-            input("   Tekan Enter setelah verifikasi di HP selesai... ")
-        except EOFError:
+            input("   Tekan Enter setelah verifikasi selesai (atau Ctrl+C untuk skip)... ")
+        except (EOFError, KeyboardInterrupt):
             pass
         time.sleep(2)
         if not cek_halaman_crossflow(driver):

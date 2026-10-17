@@ -95,7 +95,17 @@ def buat_chrome_options(proxy: str = "", mobile: bool = False) -> webdriver.Chro
     opsi.add_experimental_option("prefs", prefs)
 
     if proxy:
-        opsi.add_argument(f"--proxy-server={proxy}")
+        # Jika proxy punya autentikasi (user:pass@host:port), jangan pakai
+        # --proxy-server langsung karena Chrome tidak support auth via flag.
+        # Extension proxy akan di-load terpisah oleh _buat_driver().
+        # Jika tidak ada auth, --proxy-server aman dipakai langsung.
+        if "@" not in proxy:
+            opsi.add_argument(f"--proxy-server={proxy}")
+        else:
+            # Ekstrak hanya host:port untuk --proxy-server
+            # (auth di-handle oleh extension)
+            hostport = proxy.rsplit("@", 1)[1]
+            opsi.add_argument(f"--proxy-server={hostport}")
 
     return opsi
 

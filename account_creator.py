@@ -51,6 +51,7 @@ class GmailCreator:
         self.mobile_mode = False     # True = pakai User-Agent + viewport mobile
         self._qr_hardlock = False    # True = terjebak halaman QR tanpa alternatif
         self._ip_terakhir = ""       # IP publik terakhir (untuk blacklist)
+        self._ext_proxy_dir = None   # Path temp extension proxy auth (cleanup setelah selesai)
 
     def _bersihkan_proses_lama(self):
         """Membersihkan proses chromedriver yang tertinggal dari run sebelumnya."""
@@ -67,6 +68,15 @@ class GmailCreator:
     def _buat_driver(self):
         proxy = ambil_proxy()
         opsi = buat_chrome_options(proxy, mobile=self.mobile_mode)
+
+        # Jika proxy punya autentikasi, buat extension Chrome untuk inject credential
+        ext_proxy_dir = None
+        if proxy and "@" in proxy:
+            try:
+                from proxy_manager import buat_proxy_extension
+                ext_proxy_dir = buat_proxy_extension(proxy)
+            except Exception as e:
+                print(f"[!] Gagal buat proxy extension: {e}")
 
         # Bersihkan chromedriver lama agar tidak konflik
         self._bersihkan_proses_lama()
@@ -99,6 +109,15 @@ class GmailCreator:
                     if config.HEADLESS:
                         uc_options.add_argument("--headless=new")
 
+                    # Load proxy auth extension jika ada
+                    if ext_proxy_dir:
+                        uc_options.add_argument(f"--load-extension={ext_proxy_dir}")
+                        # Hapus --disable-extensions yang menghalangi extension load
+                        try:
+                            uc_options.arguments.remove("--disable-extensions")
+                        except ValueError:
+                            pass
+
                     # Argumen anti-detection tambahan
                     uc_options.add_argument("--disable-blink-features=AutomationControlled")
                     uc_options.add_argument("--no-sandbox")
@@ -124,10 +143,20 @@ class GmailCreator:
 
         except Exception as e:
             print(f"[!] undetected-chromedriver gagal ({e}), fallback ke Selenium biasa...")
+            # Load proxy extension di fallback Selenium juga
+            if ext_proxy_dir:
+                opsi.add_argument(f"--load-extension={ext_proxy_dir}")
+                try:
+                    opsi.arguments.remove("--disable-extensions")
+                except ValueError:
+                    pass
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=opsi)
             if config.ANTI_DETECTION:
                 terapkan_stealth(driver)
+
+        # Simpan path extension agar bisa dibersihkan setelah selesai
+        self._ext_proxy_dir = ext_proxy_dir
 
         # Timeout agar tidak menggantung selamanya
         driver.set_page_load_timeout(60)
@@ -988,13 +1017,23 @@ class GmailCreator:
         return akun.sukses
 
     def _tutup_driver(self):
-        """Menutup driver dengan aman."""
+        """Menutup driver dengan aman dan bersihkan extension proxy sementara."""
         if self.driver:
             try:
                 self.driver.quit()
             except Exception:
                 pass
             self.driver = None
+
+        # Hapus direktori extension proxy sementara
+        if self._ext_proxy_dir:
+            try:
+                import shutil
+                shutil.rmtree(self._ext_proxy_dir, ignore_errors=True)
+                print(f"[PROXY] Extension temp dibersihkan: {self._ext_proxy_dir}")
+            except Exception:
+                pass
+            self._ext_proxy_dir = None
 
     def _jalankan_pembuatan(self, akun: Akun) -> bool:
         """

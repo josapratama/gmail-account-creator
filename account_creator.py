@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, asdict
 
 from selenium import webdriver
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait, Select
@@ -28,6 +29,8 @@ from skip_detector import (
     cek_halaman_error,
     cek_halaman_sukses,
     cek_halaman_qr,
+    cek_halaman_crossflow,
+    alihkan_crossflow_ke_sms,
 )
 from proxy_manager import ambil_proxy
 
@@ -212,49 +215,99 @@ class GmailCreator:
         except Exception:
             pass
         tunggu_acak(0.2, 0.4)
-        
-        # Klik dulu untuk fokus, lalu select all + hapus, baru ketik
-        try:
-            el.click()
-        except Exception:
-            self.driver.execute_script("arguments[0].click();", el)
-        tunggu_acak(0.1, 0.3)
-        
-        # Select all dan hapus dengan berbagai cara agar bersih
-        try:
-            el.send_keys(Keys.CONTROL, "a")
-            el.send_keys(Keys.BACKSPACE)
-            el.send_keys(Keys.DELETE)
-        except Exception:
-            try:
-                el.clear()
-            except Exception:
-                self.driver.execute_script("arguments[0].value = '';", el)
-        
+
+        self._bersihkan_field(el)
         tunggu_acak(0.1, 0.2)
-        
+
+        self._ketik_aman(el, teks, human_like=human_like)
+
+        # Verifikasi dengan query ulang (elemen Wiz bisa tergantikan saat difokuskan).
+        # Bila masih kosong, isi ulang via JS agar tidak macet.
+        if isinstance(target, (str, list)) and not self._cek_nilai_input(target, teks):
+            print("   [i] Field belum terisi, isi ulang via JS...")
+            self._isi_via_js(
+                target if isinstance(target, str)
+                else (target[0] if target else None),
+                teks,
+            )
+            tunggu_acak(0.2, 0.4)
+        return el
+
+    def _ketik_aman(self, el, teks, human_like=True):
+        """
+        Mengetik ke field dengan cara yang tetap bekerja walau jendela Chrome
+        tidak fokus/tidak terlihat (kondisi umum di sesi remote/headless).
+
+        Pada kondisi tersebut `send_keys` & ActionChains di-drop oleh browser
+        (`document.hasFocus()`/`visibilityState` = hidden), sehingga pengetikan
+        dilakukan lewat CDP `Input.insertText`. Bila `human_like=True`, teks
+        diketik per karakter dengan jeda acak agar tetap menyerupai manusia.
+        """
+        try:
+            self.driver.execute_script("arguments[0].focus();", el)
+        except Exception:
+            pass
+        tunggu_acak(0.05, 0.15)
+        try:
+            if human_like:
+                for karakter in str(teks):
+                    self.driver.execute_cdp_cmd("Input.insertText", {"text": karakter})
+                    time.sleep(random.uniform(0.05, 0.15))
+            else:
+                self.driver.execute_cdp_cmd("Input.insertText", {"text": str(teks)})
+            return
+        except Exception:
+            pass
+        # Fallback terakhir bila CDP tidak tersedia: key event biasa.
         if human_like:
             ketik_manusia(el, teks)
         else:
             el.send_keys(teks)
-        
-        # Trigger event agar Google mendeteksi perubahan
+
+    def _bersihkan_field(self, el):
+        """
+        Kosongkan field dengan aman. Tidak memakai key event (ActionChains /
+        send_keys) karena di jendela Chrome yang tidak fokus, key event di-drop
+        oleh browser. Pengosongan dilakukan via native value setter di JS.
+        """
         try:
             self.driver.execute_script(
-                "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
-                "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));"
-                "arguments[0].dispatchEvent(new Event('blur', {bubbles:true}));",
+                "arguments[0].focus();"
+                "var proto = (arguments[0].tagName === 'TEXTAREA')"
+                "  ? window.HTMLTextAreaElement.prototype"
+                "  : window.HTMLInputElement.prototype;"
+                "var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;"
+                "setter.call(arguments[0], '');"
+                "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));",
                 el,
             )
+            return
         except Exception:
             pass
-        return el
+        try:
+            el.clear()
+        except Exception:
+            pass
+
+    def _cek_nilai_input(self, target, nilai):
+        """Cek nilai field dengan query ulang (menghindari handle yang sudah stale)."""
+        xpaths = [target] if isinstance(target, str) else list(target or [])
+        for xp in xpaths:
+            try:
+                el = self.driver.find_element(By.XPATH, xp)
+                if (el.get_attribute("value") or "").strip() == str(nilai).strip():
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _isi_via_js(self, xpath, nilai):
         """
         Fallback saat `element not interactable`: set nilai input langsung via
         JavaScript (native value setter) lalu trigger event input/change/blur.
         """
+        if not xpath:
+            return None
         try:
             return self.driver.execute_script(
                 """
@@ -497,65 +550,68 @@ class GmailCreator:
 
         return False
 
-    def _isi_input_tanggal(self, xpaths, nilai, label, percobaan=3):
+    def _cari_el_terlihat(self, xpaths):
+        """Kembalikan elemen pertama dari xpaths yang benar-benar tampil (rect>0)."""
+        for xp in xpaths:
+            try:
+                kandidat = self.driver.find_element(By.XPATH, xp)
+                if kandidat.is_displayed() and kandidat.size.get("width", 0) > 0:
+                    return kandidat
+            except Exception:
+                continue
+        return None
+
+    def _isi_input_tanggal(self, xpaths, nilai, label, percobaan=3, timeout=25):
         """
         Mengisi input tanggal Google (type=tel) dengan retry.
-        Elemen ini kadang belum siap saat halaman baru bertransisi sehingga
-        memunculkan 'element not interactable'; karena itu dilakukan pengecekan
-        nilai dan fallback via JavaScript.
+
+        Pada transisi SPA Google, elemen bisa sudah ada di DOM tetapi berukuran
+        0x0 (belum di-render) sehingga 'element not interactable'. Karena itu
+        ditunggu sampai field benar-benar tampil, lalu ada fallback JavaScript.
         """
         nilai = str(nilai)
-        gabung = " | ".join(xpaths)
-        try:
-            WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, gabung)))
-        except Exception:
+
+        # Tunggu field benar-benar ter-render (tampil + rect>0).
+        el = None
+        coba = 0
+        while coba < timeout:
+            el = self._cari_el_terlihat(xpaths)
+            if el is not None:
+                break
+            time.sleep(0.5)
+            coba += 0.5
+
+        if el is None:
+            # Field tidak pernah tampil: tetap coba isi via JS agar tidak macet.
+            if self._isi_via_js(xpaths[0], nilai) == nilai:
+                return True
+            if self._cek_nilai_input(xpaths, nilai):
+                return True
             print(f"   [!] Field {label} tidak muncul di halaman.")
             return False
 
         for kali in range(percobaan):
-            el = None
-            for xp in xpaths:
-                try:
-                    kandidat = self.driver.find_element(By.XPATH, xp)
-                    if kandidat.is_displayed():
-                        el = kandidat
-                        break
-                except Exception:
-                    continue
-
-            if el is None:
-                tunggu_acak(1, 1.5)
-                continue
-
             try:
                 self.driver.execute_script(
                     "arguments[0].scrollIntoView({block:'center'});", el)
                 tunggu_acak(0.2, 0.4)
-                try:
-                    el.click()
-                except Exception:
-                    self.driver.execute_script("arguments[0].click();", el)
-                el.send_keys(Keys.CONTROL, "a")
-                el.send_keys(Keys.BACKSPACE)
-                ketik_manusia(el, nilai)
+                self._bersihkan_field(el)
+                self._ketik_aman(el, nilai, human_like=True)
                 tunggu_acak(0.3, 0.6)
             except Exception as e:
                 print(f"   [i] Input {label} normal gagal ({str(e).splitlines()[0]}); fallback JS.")
 
-            try:
-                if (el.get_attribute("value") or "").strip() == nilai:
-                    return True
-            except Exception:
-                pass
+            # Verifikasi dengan query ulang (hindari handle stale)
+            if self._cek_nilai_input(xpaths, nilai):
+                return True
 
-            self._isi_via_js(xpaths[0], nilai)
+            if self._isi_via_js(xpaths[0], nilai) == nilai:
+                return True
             tunggu_acak(0.4, 0.8)
-            try:
-                if (el.get_attribute("value") or "").strip() == nilai:
-                    return True
-            except Exception:
-                pass
+            if self._cek_nilai_input(xpaths, nilai):
+                return True
+            # Elemen bisa ter-render ulang; cari handle baru.
+            el = self._cari_el_terlihat(xpaths) or el
             tunggu_acak(0.5, 1)
 
         print(f"   [!] Gagal mengisi {label} setelah {percobaan} percobaan.")
@@ -989,25 +1045,6 @@ class GmailCreator:
             self._isi(last_name_xpaths, akun.nama_belakang)
             tunggu_acak(0.8, 1.5)
 
-            # Verifikasi field nama benar-benar terisi; isi ulang via JS kalau kosong
-            for xp_list, nilai in ((first_name_xpaths, akun.nama_depan),
-                                   (last_name_xpaths, akun.nama_belakang)):
-                try:
-                    el = None
-                    for xp in xp_list:
-                        try:
-                            kandidat = self.driver.find_element(By.XPATH, xp)
-                            if kandidat.is_displayed():
-                                el = kandidat
-                                break
-                        except Exception:
-                            continue
-                    if el is not None and not (el.get_attribute("value") or "").strip():
-                        print("   [i] Field nama kosong, isi ulang via JS...")
-                        self._isi_via_js(xp_list[0], nilai)
-                except Exception:
-                    pass
-            
             # Klik Next dan tunggu URL benar-benar berubah (transisi Google bisa lambat)
             url_sebelum = self.driver.current_url
             next_diklik = False
@@ -1181,11 +1218,28 @@ class GmailCreator:
             print("[4/6] Mengisi password...")
             self._interaksi_manusia()
             try:
-                self._isi('//*[@id="passwd"]/div[1]/div/div[1]/input', akun.password)
+                # Halaman password Google: input[name=Passwd] & input[name=PasswdAgain]
+                passwd_xpaths = [
+                    '//input[@name="Passwd"]',
+                    '//*[@id="passwd"]//input[@type="password"]',
+                    '//input[@aria-label="Password"]',
+                    '//input[@type="password"]',
+                ]
+                konfirmasi_xpaths = [
+                    '//input[@name="PasswdAgain"]',
+                    '//*[@id="confirm-passwd"]//input[@type="password"]',
+                    '//input[@aria-label="Confirm"]',
+                    '//input[@type="password"]',
+                ]
+                self._isi(passwd_xpaths, akun.password)
                 tunggu_acak(0.8, 1.5)
-                self._isi('//*[@id="confirm-passwd"]/div[1]/div/div[1]/input', akun.password)
+                self._isi(konfirmasi_xpaths, akun.password)
                 tunggu_acak(0.8, 1.5)
-                self._klik('//*[@id="createpasswordNext"]/div/button')
+                self._klik([
+                    '//*[@id="createpasswordNext"]//button',
+                    '//button[contains(.,"Next")]',
+                    '//button[contains(.,"Berikutnya")]',
+                ])
                 tunggu_acak(3, 5)
             except Exception as e:
                 print(f"   [!] Error mengisi password: {e}")
@@ -1517,6 +1571,15 @@ class GmailCreator:
         if is_phone_page:
             print("   [i] Halaman verifikasi telepon terdeteksi.")
 
+        # Jika halaman device-check (crossflow), coba beralih ke SMS via tombol
+        # "Use a phone number instead" sebelum lanjut ke flow normal.
+        if cek_halaman_crossflow(self.driver):
+            if not alihkan_crossflow_ke_sms(self.driver):
+                print("   [✗] Gagal melewati halaman device-check (crossflow).")
+                return "gagal"
+            # Setelah berhasil beralih, tunggu halaman input nomor telepon
+            time.sleep(2)
+
         # Jika masih halaman QR, coba alihkan ke SMS dulu (agar field telepon muncul)
         if cek_halaman_qr(self.driver):
             if not self._alihkan_qr_ke_sms():
@@ -1726,7 +1789,8 @@ class GmailCreator:
 
             print(f"   [i] Memasukkan nomor: {nomor_untuk_input}")
             try:
-                input_telp.send_keys(nomor_untuk_input)
+                self._bersihkan_field(input_telp)
+                self._ketik_aman(input_telp, nomor_untuk_input, human_like=True)
             except Exception:
                 self.driver.execute_script(
                     "arguments[0].value = arguments[1];"
@@ -1786,9 +1850,9 @@ class GmailCreator:
                 try:
                     input_kode = self._tunggu_input(kode_xpath, timeout=8)
                     if input_kode.is_displayed():
-                        input_kode.clear()
+                        self._bersihkan_field(input_kode)
                         try:
-                            input_kode.send_keys(str(kode))
+                            self._ketik_aman(input_kode, str(kode), human_like=True)
                         except Exception:
                             self.driver.execute_script(
                                 "arguments[0].value = arguments[1];"

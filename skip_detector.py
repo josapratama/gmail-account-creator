@@ -47,16 +47,104 @@ def cari_dan_klik_skip(driver: webdriver.Chrome, timeout: int = 10) -> bool:
     return False
 
 
+def cek_halaman_crossflow(driver: webdriver.Chrome) -> bool:
+    """
+    Mengecek apakah halaman saat ini adalah halaman 'crossflowverification'
+    Google — halaman 'Do a device check' yang muncul saat Google mendeteksi
+    HP terhubung (hotspot). Halaman ini mempunyai tombol 'Use a phone number
+    instead' yang bisa diklik untuk beralih ke verifikasi SMS biasa.
+    """
+    try:
+        url = driver.current_url.lower()
+        if "crossflowverification" in url or "samedevice" in url:
+            return True
+    except Exception:
+        pass
+
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+        crossflow_keywords = [
+            "do a device check",
+            "use this phone to verify",
+            "device check",
+        ]
+        return any(k in body for k in crossflow_keywords)
+    except Exception:
+        return False
+
+
+def alihkan_crossflow_ke_sms(driver: webdriver.Chrome, timeout: int = 15) -> bool:
+    """
+    Di halaman crossflowverification, cari dan klik tombol/link
+    'Use a phone number instead' atau 'Try another way' agar browser
+    beralih ke halaman input nomor SMS biasa.
+    Mengembalikan True jika berhasil beralih.
+    """
+    from anti_detection import tunggu_acak
+
+    print("   [i] Terdeteksi halaman device-check (crossflow), mencari opsi SMS...")
+
+    # Scroll ke bawah dulu karena tombol biasanya di bawah ilustrasi
+    try:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
+    except Exception:
+        pass
+
+    keywords = [
+        "use a phone number instead",
+        "use phone number instead",
+        "phone number instead",
+        "try another way",
+        "cara lain",
+        "nomor telepon",
+        "use phone",
+        "another way",
+    ]
+
+    batas = time.time() + timeout
+    while time.time() < batas:
+        kandidat = driver.find_elements(
+            By.XPATH,
+            "//button | //a | //div[@role='button'] | //span[@role='button']"
+        )
+        for el in kandidat:
+            try:
+                if not el.is_displayed():
+                    continue
+                teks = (el.text or "").strip().lower()
+                aria = (el.get_attribute("aria-label") or "").strip().lower()
+                combined = f"{teks} {aria}"
+                if any(k in combined for k in keywords):
+                    print(f"   [✓] Menemukan opsi SMS: '{el.text.strip() or aria}'")
+                    try:
+                        el.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", el)
+                    tunggu_acak(2, 3)
+                    # Cek apakah berhasil keluar dari crossflow
+                    if not cek_halaman_crossflow(driver):
+                        return True
+            except Exception:
+                continue
+        time.sleep(0.5)
+
+    print("   [!] Tombol 'Use phone number instead' tidak ditemukan di halaman crossflow.")
+    return False
+
+
 def cek_halaman_verifikasi_telepon(driver: webdriver.Chrome) -> bool:
     """
     Mengecek apakah halaman saat ini adalah halaman verifikasi telepon.
-    Termasuk halaman QR code (Google sekarang menampilkan QR dulu sebelum
-    opsi input nomor telepon).
+    Termasuk halaman QR code dan crossflowverification (device check).
     """
     # Cek URL: mophoneverification = mobile phone verification (QR / SMS)
     try:
         url = driver.current_url.lower()
         if "mophneverification" in url or "phoneverification" in url:
+            return True
+        # Crossflow = device check, bagian dari alur verifikasi
+        if "crossflowverification" in url or "samedevice" in url:
             return True
     except Exception:
         pass
@@ -68,12 +156,13 @@ def cek_halaman_verifikasi_telepon(driver: webdriver.Chrome) -> bool:
     except Exception:
         pass
 
-    # Cek teks "phone", "telepon", atau QR di halaman
+    # Cek teks "phone", "telepon", QR, atau device check di halaman
     try:
         body = driver.find_element(By.TAG_NAME, "body").text.lower()
         kata_kunci = [
             "phone", "telepon", "nomor ponsel", "mobile", "verification",
             "qr code", "scan the qr", "verify some info",
+            "do a device check", "device check",
         ]
         return any(k in body for k in kata_kunci)
     except Exception:
@@ -86,10 +175,13 @@ def cek_halaman_qr(driver: webdriver.Chrome) -> bool:
     (belum ada input nomor telepon). Mengembalikan True jika QR terdeteksi
     dan tidak ada input tel yang terlihat.
 
-    Deteksi memakai tiga sumber: teks QR, elemen gambar/kanvas QR, dan
-    konteks URL challenge. Jika ada input nomor telepon yang terlihat,
-    halaman dianggap BUKAN halaman QR.
+    CATATAN: Halaman crossflowverification (device check) juga punya gambar/canvas
+    tapi BUKAN halaman QR — fungsi ini mengembalikan False untuk halaman tersebut.
     """
+    # Halaman crossflow bukan halaman QR
+    if cek_halaman_crossflow(driver):
+        return False
+
     # Jika ada input nomor telepon yang terlihat -> bukan halaman QR
     try:
         for inp in driver.find_elements(By.XPATH, "//input[@type='tel']"):
@@ -192,6 +284,9 @@ def cek_halaman_sukses(driver: webdriver.Chrome) -> bool:
         url = driver.current_url.lower()
         # Pastikan BUKAN halaman verifikasi telepon
         if "mophneverification" in url or "phoneverification" in url:
+            return False
+        # Pastikan BUKAN halaman crossflow/device check
+        if "crossflowverification" in url or "samedevice" in url:
             return False
         # Pastikan BUKAN halaman signin/login (bukan indikator sukses)
         if "signin" in url or "identifier" in url or "challenge" in url:

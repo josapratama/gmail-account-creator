@@ -1,0 +1,21 @@
+# ─── Rahasia / kredensial (JANGAN pernah di-push) ──────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Hasil pembuatan akun (mengandung email + password asli) ───────────
+accounts.json
+accounts.log
+
+# ─── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ─── Virtualenv ────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ─── Log & artefak sementara ───────────────────────────────────────────
+*.log

@@ -63,14 +63,22 @@ def buat_chrome_options(proxy: str = "", mobile: bool = False) -> webdriver.Chro
     opsi.add_argument("--no-sandbox")
     opsi.add_argument("--disable-extensions")
     opsi.add_argument("--disable-dev-shm-usage")
+    # Jaga jendela tetap dianggap "visible" walau tertutup jendela lain.
+    # Tanpa ini, Chrome menandai halaman sebagai hidden (document.visibilityState
+    # = 'hidden') sehingga aplikasi SPA Google (Wiz) tidak me-render step baru
+    # dan field-nya tetap berukuran 0x0 / tidak bisa diisi.
+    opsi.add_argument("--disable-backgrounding-occluded-windows")
+    opsi.add_argument("--disable-renderer-backgrounding")
+    opsi.add_argument("--disable-background-timer-throttling")
 
     if mobile:
         opsi.add_argument(f"--user-agent={random.choice(MOBILE_USER_AGENTS)}")
         opsi.add_argument(f"--window-size={MOBILE_WIDTH},{MOBILE_HEIGHT}")
     else:
-        opsi.add_argument("--start-maximized")
+        # Gunakan ukuran jendela yang cukup besar agar konten tidak terpotong
+        # namun tidak full screen agar tetap terlihat stabil di mode otomatis.
+        opsi.add_argument("--window-size=1280,1024")
         opsi.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-        opsi.add_argument("--window-size=1920,1080")
 
     opsi.add_argument("--disable-infobars")
     

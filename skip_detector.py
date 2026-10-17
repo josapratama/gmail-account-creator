@@ -68,6 +68,9 @@ def cek_halaman_crossflow(driver: webdriver.Chrome) -> bool:
             "do a device check",
             "use this phone to verify",
             "device check",
+            "verify some info before creating an account",
+            "verify some info",
+            "helps keep you and others safe online",
         ]
         return any(k in body for k in crossflow_keywords)
     except Exception:

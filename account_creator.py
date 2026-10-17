@@ -1080,6 +1080,13 @@ class GmailCreator:
                 print("   [!] Gagal lanjut dari tahap nama (URL tidak berubah).")
             tunggu_acak(1, 2)
 
+            # Cek verifikasi telepon (Google bisa memicu verifikasi di mana saja)
+            if cek_halaman_verifikasi_telepon(self.driver):
+                print("   [i] Verifikasi telepon terdeteksi setelah langkah nama.")
+                hasil_v = self._tangani_verifikasi(akun)
+                if hasil_v == "gagal": return False
+                tunggu_acak(1, 2)
+
             # ── Langkah 2: Tanggal lahir & gender ──
             print("[2/6] Mengisi tanggal lahir & gender...")
             self._interaksi_manusia()
@@ -1091,8 +1098,13 @@ class GmailCreator:
                             (By.XPATH, '//*[@id="day"] | //input[@name="day"]'))
                     )
                 except Exception:
-                    print(f"   [!] Halaman tanggal lahir tidak muncul. URL: {self.driver.current_url}")
-                    raise
+                    if cek_halaman_verifikasi_telepon(self.driver):
+                        print("   [i] Verifikasi telepon terdeteksi di tahap tanggal lahir.")
+                        hasil_v = self._tangani_verifikasi(akun)
+                        if hasil_v == "gagal": return False
+                    else:
+                        print(f"   [!] Halaman tanggal lahir tidak muncul. URL: {self.driver.current_url}")
+                        raise
 
                 # Day & Year: input type=tel; retry + fallback JS bila belum siap
                 self._isi_input_tanggal(
@@ -1213,6 +1225,13 @@ class GmailCreator:
             except Exception as e:
                 print(f"   [!] Error mengisi username: {e}")
                 return False
+
+            # Cek verifikasi telepon setelah username
+            if cek_halaman_verifikasi_telepon(self.driver):
+                print("   [i] Verifikasi telepon terdeteksi setelah langkah username.")
+                hasil_v = self._tangani_verifikasi(akun)
+                if hasil_v == "gagal": return False
+                tunggu_acak(1, 2)
 
             # ── Langkah 4: Password ──
             print("[4/6] Mengisi password...")
